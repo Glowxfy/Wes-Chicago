@@ -1,0 +1,392 @@
+-- AppleLibrary (Studio-native edition)
+-- Requires the editable AppleLibraryGui supplied with this model.
+-- API compatible with GoHamza/AppleLibrary's example (single window per GUI).
+-- No HttpGet, loadstring, executor APIs, CoreGui writes, or remote dependencies.
+
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Debris = game:GetService("Debris")
+
+local Library = {}
+local gui = script.Parent
+local main = gui:WaitForChild("main")
+local sidebar = main:WaitForChild("sidebar")
+local workarea = main:WaitForChild("workarea")
+local traffic = main:WaitForChild("buttons")
+local search = main:WaitForChild("search")
+local searchBox = search:WaitForChild("searchtextbox")
+local titleLabel = main:WaitForChild("title")
+local notif1, notif2 = main:WaitForChild("notif"), main:WaitForChild("notif2")
+local toastTemplate = gui:WaitForChild("TempNotificationTemplate")
+
+-- Keep blueprint instances offscreen in Lua, not in the visible GUI hierarchy.
+-- All generated controls are clones of the editable originals in this model.
+local elementsPage = workarea:WaitForChild("ElementsPage")
+local notificationsPage = workarea:WaitForChild("NotificationsPage")
+local blueprint = {
+    tab = sidebar:WaitForChild("ElementsTab"):Clone(),
+    page = elementsPage:Clone(),
+    sectionTitle = elementsPage:WaitForChild("SectionTitle"):Clone(),
+    divider = elementsPage:WaitForChild("Divider2"):Clone(),
+    button = elementsPage:WaitForChild("ClickMeButton"):Clone(),
+    label = elementsPage:WaitForChild("ExampleLabel"):Clone(),
+    switch = elementsPage:WaitForChild("toggleswitch"):Clone(),
+    field = elementsPage:WaitForChild("textfield"):Clone(),
+}
+local current = nil
+local activeConnections = {}
+local tabs = {}
+local pages = {}
+local order = 0
+local callbacks1, callbacks2 = nil, nil
+local mainScale = main:FindFirstChild("AppleResponsiveScale") or Instance.new("UIScale")
+mainScale.Name = "AppleResponsiveScale"
+mainScale.Parent = main
+
+local function bind(signal, fn)
+    local connection = signal:Connect(fn)
+    table.insert(activeConnections, connection)
+    return connection
+end
+
+local function clearBindings()
+    for _, connection in ipairs(activeConnections) do
+        connection:Disconnect()
+    end
+    table.clear(activeConnections)
+end
+
+local function corner(instance, radius)
+    local ui = instance:FindFirstChildOfClass("UICorner") or Instance.new("UICorner")
+    ui.CornerRadius = UDim.new(0, radius)
+    ui.Parent = instance
+end
+
+local function nextOrder()
+    order += 1
+    return order
+end
+
+local function decorate(element, parent, name)
+    element.Name = name
+    element.LayoutOrder = nextOrder()
+    element.Visible = true
+    element.Parent = parent
+    return element
+end
+
+local function cleanPage(page)
+    for _, child in ipairs(page:GetChildren()) do
+        if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+            child:Destroy()
+        end
+    end
+    page.CanvasPosition = Vector2.zero
+    page.ScrollingEnabled = true
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+end
+
+local function updateScale()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    local viewport = camera.ViewportSize
+    -- The smallest screen dimension must fit the panel.
+    mainScale.Scale = math.min(1, math.max(0.38,
+        math.min((viewport.X - 24) / 745, (viewport.Y - 24) / 608)))
+end
+
+local function select(section)
+    for _, tab in ipairs(tabs) do
+        tab.BackgroundTransparency = 1
+        tab.TextColor3 = Color3.fromRGB(28, 28, 30)
+    end
+    for _, page in ipairs(pages) do page.Visible = false end
+    if section then
+        section._tab.BackgroundTransparency = 0
+        section._tab.TextColor3 = Color3.fromRGB(255, 255, 255)
+        section._page.Visible = true
+    end
+end
+
+local function safeCall(fn, ...)
+    if type(fn) ~= "function" then return end
+    local ok, err = pcall(fn, ...)
+    if not ok then warn("[AppleLibrary] Callback failed:", err) end
+end
+
+local function makeSplash()
+    local splash = Instance.new("Frame")
+    splash.Name = "AppleSplash"
+    splash.AnchorPoint = Vector2.new(0.5, 0.5)
+    splash.Position = UDim2.fromScale(0.5, 0.5)
+    splash.Size = UDim2.fromOffset(174, 174)
+    splash.BackgroundColor3 = Color3.fromRGB(248, 248, 250)
+    splash.BackgroundTransparency = 0.10
+    splash.ZIndex = 50
+    splash.Parent = gui
+    corner(splash, 28)
+    local apple = Instance.new("ImageLabel")
+    apple.BackgroundTransparency = 1
+    apple.AnchorPoint = Vector2.new(0.5, 0.5)
+    apple.Position = UDim2.fromScale(0.5, 0.5)
+    apple.Size = UDim2.fromOffset(110, 110)
+    apple.Image = "rbxassetid://12621719043"
+    apple.ZIndex = 51
+    apple.Parent = splash
+    task.delay(0.65, function()
+        if not splash.Parent then return end
+        TweenService:Create(splash, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+        TweenService:Create(apple, TweenInfo.new(0.3), {ImageTransparency = 1}):Play()
+        Debris:AddItem(splash, 0.31)
+    end)
+end
+
+local Window = {}
+Window.__index = Window
+
+function Window:ToggleVisible()
+    if not gui.Enabled then gui.Enabled = true; main.Visible = true; return end
+    main.Visible = not main.Visible
+end
+
+function Window:Divider(text)
+    local divider = Instance.new("TextLabel")
+    divider.Name = "SidebarDivider"
+    divider.Size = UDim2.new(1, -8, 0, 29)
+    divider.BackgroundTransparency = 1
+    divider.Font = Enum.Font.Gotham
+    divider.TextSize = 17
+    divider.TextColor3 = Color3.fromRGB(107, 107, 111)
+    divider.TextXAlignment = Enum.TextXAlignment.Left
+    divider.TextTruncate = Enum.TextTruncate.AtEnd
+    divider.Text = tostring(text or "")
+    return decorate(divider, sidebar, "SidebarDivider")
+end
+
+local Section = {}
+Section.__index = Section
+
+function Window:Section(name)
+    local page = blueprint.page:Clone()
+    cleanPage(page)
+    page.Name = "SectionPage_" .. (#pages + 1)
+    page.Visible = false
+    page.Parent = workarea
+    local heading = decorate(blueprint.sectionTitle:Clone(), page, "SectionTitle")
+    heading.Text = tostring(name or "Section")
+    local tab = decorate(blueprint.tab:Clone(), sidebar, "SectionTab_" .. (#tabs + 1))
+    tab.Text = tostring(name or "Section")
+    local section = setmetatable({_page = page, _tab = tab}, Section)
+    table.insert(pages, page)
+    table.insert(tabs, tab)
+    bind(tab.Activated, function() section:Select() end)
+    if not current then current = section; select(section) end
+    return section
+end
+
+function Section:Select()
+    current = self
+    select(self)
+end
+
+function Section:Divider(text)
+    local item = decorate(blueprint.divider:Clone(), self._page, "Divider")
+    local label = item:FindFirstChild("DividerText", true)
+    if label then label.Text = tostring(text or "") end
+    return item
+end
+
+function Section:Button(text, callback)
+    local button = decorate(blueprint.button:Clone(), self._page, "AppleButton")
+    button.Text = tostring(text or "Button")
+    bind(button.Activated, function() safeCall(callback) end)
+    return button
+end
+
+function Section:Label(text)
+    local label = decorate(blueprint.label:Clone(), self._page, "AppleLabel")
+    label.Text = tostring(text or "")
+    return label
+end
+
+function Section:Switch(text, initialValue, callback)
+    local wrapper = decorate(blueprint.switch:Clone(), self._page, "AppleSwitch")
+    local label = wrapper:FindFirstChild("SwitchLabel")
+    if label then label.Text = tostring(text or "Switch") end
+    local track = wrapper:WaitForChild("SwitchTrack")
+    local knob = track:WaitForChild("SwitchKnob")
+    local on = initialValue == true
+    local function draw(animated)
+        track.BackgroundColor3 = on and Color3.fromRGB(21, 103, 251) or Color3.fromRGB(216, 216, 216)
+        local position = on and UDim2.fromOffset(35, 1) or UDim2.fromOffset(1, 1)
+        if animated then
+            TweenService:Create(knob, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {Position = position}):Play()
+        else
+            knob.Position = position
+        end
+    end
+    draw(false)
+    local function toggle()
+        on = not on
+        draw(true)
+        safeCall(callback, on)
+    end
+    bind(track.Activated, toggle)
+    bind(knob.Activated, toggle)
+    return {
+        Instance = wrapper,
+        Set = function(_, value) on = value == true; draw(true); safeCall(callback, on) end,
+        Get = function() return on end,
+    }
+end
+
+function Section:TextField(text, placeholder, callback)
+    local wrapper = decorate(blueprint.field:Clone(), self._page, "AppleTextField")
+    local label = wrapper:FindFirstChild("TextFieldLabel")
+    if label then label.Text = tostring(text or "Text") end
+    local input = wrapper:FindFirstChild("Input", true)
+    assert(input and input:IsA("TextBox"), "AppleLibraryGui is missing the Input template")
+    input.Text = ""
+    input.PlaceholderText = tostring(placeholder or "")
+    bind(input.FocusLost, function() safeCall(callback, input.Text) end)
+    return input
+end
+
+function Window:GreenButton(callback)
+    if self._greenConnection then self._greenConnection:Disconnect() end
+    self._greenConnection = bind(traffic:WaitForChild("resize").Activated, function()
+        safeCall(callback)
+    end)
+end
+
+function Window:TempNotify(text1, text2, icon)
+    for _, child in ipairs(gui:GetChildren()) do
+        if child.Name == "AppleTempNotification" and child.Visible then
+            child.Position += UDim2.fromOffset(0, 120)
+        end
+    end
+    local toast = toastTemplate:Clone()
+    toast.Name = "AppleTempNotification"
+    toast.t1.Text = tostring(text1 or "Notice")
+    toast.t2.Text = tostring(text2 or "")
+    toast.ticon.Image = tostring(icon or "")
+    toast.Parent = gui
+    toast.Visible = true
+    Debris:AddItem(toast, 5)
+    return toast
+end
+
+function Window:Notify(text1, text2, button, icon, callback)
+    if notif1.Visible or notif2.Visible then return false end
+    notif1.notiftitle.Text = tostring(text1 or "Notice")
+    notif1.notiftext.Text = tostring(text2 or "")
+    notif1.notificon.Image = tostring(icon or "")
+    notif1.notifbutton1.Text = tostring(button or "OK")
+    callbacks1 = callback
+    notif1.Visible = true
+    return true
+end
+
+function Window:Notify2(text1, text2, button1, button2, icon, callback1, callback2)
+    if notif1.Visible or notif2.Visible then return false end
+    notif2.notif2title.Text = tostring(text1 or "Notice")
+    notif2.notif2text.Text = tostring(text2 or "")
+    notif2.notif2icon.Image = tostring(icon or "")
+    notif2.notif2button1.Text = tostring(button1 or "Yes")
+    notif2.notif2button2.Text = tostring(button2 or "No")
+    callbacks2 = {callback1, callback2}
+    notif2.Visible = true
+    return true
+end
+
+function Library:init(title, doSplash, visibleKey, deletePrevious)
+    if self._started and not deletePrevious then
+        warn("[AppleLibrary] Window already initialized; rebuilding it")
+    end
+    clearBindings()
+    self._started = true
+    current, order = nil, 0
+    table.clear(tabs)
+    table.clear(pages)
+    for _, child in ipairs(sidebar:GetChildren()) do
+        if child:IsA("GuiObject") then child:Destroy() end
+    end
+    for _, child in ipairs(workarea:GetChildren()) do
+        if child:IsA("ScrollingFrame") then child:Destroy() end
+    end
+    searchBox.Text = ""
+    titleLabel.Text = tostring(title or "")
+    notif1.Visible = false
+    notif2.Visible = false
+    callbacks1, callbacks2 = nil, nil
+    gui.Enabled = true
+    main.Visible = true
+    main.Position = UDim2.fromScale(0.5, 0.5)
+    updateScale()
+    if doSplash then makeSplash() end
+    local window = setmetatable({_gui = gui, _main = main}, Window)
+    self._window = window
+
+    bind(searchBox:GetPropertyChangedSignal("Text"), function()
+        local query = searchBox.Text:lower()
+        for _, tab in ipairs(tabs) do
+            tab.Visible = query == "" or tab.Text:lower():find(query, 1, true) ~= nil
+        end
+    end)
+    bind(search:WaitForChild("searchicon").Activated, function() searchBox:CaptureFocus() end)
+    bind(traffic.close.Activated, function() gui.Enabled = false end)
+    bind(traffic.minimize.Activated, function() main.Visible = false end)
+    bind(UserInputService.InputBegan, function(input, wasProcessed)
+        if not wasProcessed and visibleKey and input.KeyCode == visibleKey then
+            window:ToggleVisible()
+        end
+    end)
+    bind(notif1.notifbutton1.Activated, function()
+        local action = callbacks1
+        callbacks1 = nil
+        notif1.Visible = false
+        safeCall(action)
+    end)
+    bind(notif2.notif2button1.Activated, function()
+        local actions = callbacks2
+        callbacks2 = nil
+        notif2.Visible = false
+        safeCall(actions and actions[1])
+    end)
+    bind(notif2.notif2button2.Activated, function()
+        local actions = callbacks2
+        callbacks2 = nil
+        notif2.Visible = false
+        safeCall(actions and actions[2])
+    end)
+
+    -- Drag by the titlebar, including on touchscreens.
+    titleLabel.Active = true
+    local dragging, dragOrigin, originPosition, dragObject = false, nil, nil, nil
+    bind(titleLabel.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragOrigin = input.Position
+            originPosition = main.Position
+            dragObject = input
+        end
+    end)
+    bind(UserInputService.InputChanged, function(input)
+        if not dragging then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement and input ~= dragObject then return end
+        local delta = (input.Position - dragOrigin) / mainScale.Scale
+        main.Position = UDim2.new(originPosition.X.Scale, originPosition.X.Offset + delta.X,
+            originPosition.Y.Scale, originPosition.Y.Offset + delta.Y)
+    end)
+    bind(UserInputService.InputEnded, function(input)
+        if input == dragObject or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+            dragObject = nil
+        end
+    end)
+    local camera = workspace.CurrentCamera
+    if camera then bind(camera:GetPropertyChangedSignal("ViewportSize"), updateScale) end
+    return window
+end
+
+return Library
